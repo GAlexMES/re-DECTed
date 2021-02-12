@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <poll.h>
 #include <assert.h>
+#include <stdbool.h>
 
 static const char clrscr[] = "\33[3;J\33[H\33[2J";
 
@@ -153,6 +154,11 @@ typedef struct dectrx_s {
 	uint64_t stats[N_STATS];
 } dectrx_t;
 
+typedef struct dectrx_fc_s {
+	int frameno;
+	uint8_t channel;
+} dectrx_fc_t;
+
 static void dectrx_stats(dectrx_t *drx, time64_t delta_t, int multi_ch) {
 	int i;
 
@@ -184,11 +190,11 @@ static dectrx_t *dectrx_create(uint16_t rxport) {
 	assert(sock >= 0);
 	
 	memset((char *) &si, 0, sizeof(si));
-    si.sin_family = AF_INET;
-    si.sin_port = htons(rxport);
-    si.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    res = bind(sock , (struct sockaddr*)&si, sizeof(si) );
-    assert(!res);
+	si.sin_family = AF_INET;
+	si.sin_port = htons(rxport);
+	si.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	res = bind(sock , (struct sockaddr*)&si, sizeof(si) );
+	assert(!res);
 	
 	fd_nonblock(sock);
 	
@@ -202,7 +208,7 @@ static dectrx_t *dectrx_create(uint16_t rxport) {
 	return drx;
 }
 
-static int dectrx_rx(dectrx_t *drx, int eth_sock) {
+static int dectrx_rx(dectrx_t *drx, dectrx_fc_t *drx_fc, int eth_sock) {
 	uint8_t buf[2048], *p=buf, *op;
 	int res = recv(drx->sock, buf, sizeof(buf), 0);
 	
@@ -221,10 +227,14 @@ static int dectrx_rx(dectrx_t *drx, int eth_sock) {
 			syncm = drx->sync & 0xffffff;
 			match = (syncm == FP_SYNC) || (syncm == PP_SYNC);
 			if(match) {
+				if(drx->channel == drx_fc->channel){
+					drx_fc->frameno = drx_fc->frameno + 1;
+				}
 				uint8_t *op = drx->ethbuf + ETH_HLEN;
 				dect_rxhdr_t *rxhdr = (dect_rxhdr_t *)op;
 				//printf("%08x\n",syncm);
 				rxhdr->channel = drx->channel;
+				rxhdr->frameno = drx_fc->frameno;
 				rxhdr->preamble[2] = (drx->sync>>24)&0xff;
 				rxhdr->preamble[1] = (drx->sync>>32)&0xff;
 				rxhdr->preamble[0] = (drx->sync>>40)&0xff;
@@ -235,7 +245,7 @@ static int dectrx_rx(dectrx_t *drx, int eth_sock) {
 			}
 			if(match || (drx->bitcnt < 0))
 				continue;
-
+			
 			//printf("%d %d\n",drx->bitcnt>>3,drx->frame_len);
 			assert(drx->frame_len >= sizeof(dect_afield_t));
 			assert((drx->bitcnt>>3)<=(sizeof(dect_afield_t)+100));
@@ -249,6 +259,12 @@ static int dectrx_rx(dectrx_t *drx, int eth_sock) {
 			if(drx->bitcnt == (sizeof(dect_afield_t)<<3)) {
 				uint16_t crc = calc_rcrc(drx->ethbuf + ETH_HLEN + sizeof(dect_rxhdr_t));
 				dect_afield_t *af = (dect_afield_t *) (drx->ethbuf + ETH_HLEN + sizeof(dect_rxhdr_t));
+				bool isQt = ((af->header >> 5 ) & 0x07) == 4;
+				if(isQt){
+					drx_fc->frameno = 8;
+					drx_fc->channel = drx->channel;
+					//rxhdr->frameno = 8;
+				}
 				uint8_t ba = (af->header>>1)&7;
 				int blen;
 				
@@ -262,8 +278,8 @@ static int dectrx_rx(dectrx_t *drx, int eth_sock) {
 				
 				switch(ba) {
 					case 7: 	blen = 0;	break;		/* no B-field */
-					case 4:		blen = 10;	break;		/* half slot */
-					case 2:		blen = 100;	break;		/* double slot */
+					case 4:	blen = 10;	break;		/* half slot */
+					case 2:	blen = 100;	break;		/* double slot */
 					default:	blen = 40;	/* full slot */
 				}
 				blen += blen ? 1 : 0; /* account for X/Z-fields */
@@ -276,11 +292,15 @@ static int dectrx_rx(dectrx_t *drx, int eth_sock) {
 			if((drx->bitcnt>>3) == drx->frame_len) {
 				/* B-field complete */
 				drx->bitcnt=-1;
+				printf("frame sent to ethernet \n");
+				fflush(stdout);
 				send(eth_sock, drx->ethbuf, ETH_HLEN + sizeof(dect_rxhdr_t) + drx->frame_len, 0);
 				if(drx->verbose) {
 					hexdump(drx->ethbuf + ETH_HLEN + sizeof(dect_rxhdr_t) - 5, drx->frame_len + 5);
 					puts("");
 				}
+			} else {
+				printf("Not send \n");
 			}
 		} /* foreach incoming bit */
 	} /* foreach incoming byte */
@@ -289,8 +309,9 @@ static int dectrx_rx(dectrx_t *drx, int eth_sock) {
 
 int main(int argc, char **argv) {
 	int res, eth_sock = dummy0_open();
-	int i, channels = 1;
+	int i, channels = 10;
 	dectrx_t *drx[10];
+	struct dectrx_fc_s dectrx_fc;
 	struct pollfd pfds[10];
 	time64_t stats_ts;
 	
@@ -316,9 +337,10 @@ int main(int argc, char **argv) {
 				puts(clrscr);
 		}
 		
+		
 		for(i=0;i<channels;i++) {
 			if(pfds[i].revents)
-				dectrx_rx(drx[i], eth_sock);
+				dectrx_rx(drx[i], &dectrx_fc, eth_sock);
 			if(stats_update)
 				dectrx_stats(drx[i], delta_t, (channels > 1));
 		}

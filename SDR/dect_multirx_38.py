@@ -204,7 +204,7 @@ class dect_multirx_38(gr.top_block, Qt.QWidget):
         self.pfb_channelizer_ccf_0.set_channel_map([])
         self.pfb_channelizer_ccf_0.declare_sample_delay(0)
         self.osmosdr_source_0 = osmosdr.source(
-            args="numchan=" + str(1) + " " + ''
+            args="numchan=" + str(1) + " " + 'hackrf=0'
         )
         self.osmosdr_source_0.set_time_unknown_pps(osmosdr.time_spec_t())
         self.osmosdr_source_0.set_sample_rate(samp_rate)

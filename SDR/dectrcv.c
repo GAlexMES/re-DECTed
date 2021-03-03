@@ -112,6 +112,7 @@ typedef struct __attribute__((packed)) dect_rxhdr_s {
 	uint8_t rssi;
 	uint8_t preamble[3];
 	uint16_t sync;
+	bool isFP;
 } dect_rxhdr_t;
 
 typedef struct __attribute__((packed)) dect_afield_s {
@@ -212,12 +213,14 @@ static int dectrx_rx(dectrx_t *drx, dectrx_fc_t *drx_fc, int eth_sock) {
 	uint8_t buf[2048], *p=buf, *op;
 	int res = recv(drx->sock, buf, sizeof(buf), 0);
 	
+	dect_rxhdr_t *rxhdr = NULL;
 	if(res <= 0)
 		return res;
 	
 	for(;res;res--,p++) {
 		uint32_t syncm;
 		int match, i;
+		bool isFP;
 		
 		for(i=7;i>=0;i--) {
 			uint8_t bit = (*p>>i)&1;
@@ -225,13 +228,15 @@ static int dectrx_rx(dectrx_t *drx, dectrx_fc_t *drx_fc, int eth_sock) {
 			drx->sync<<=1;
 			drx->sync|=bit;
 			syncm = drx->sync & 0xffffff;
-			match = (syncm == FP_SYNC) || (syncm == PP_SYNC);
+			isFP = syncm == FP_SYNC;
+			match = (isFP) || (syncm == PP_SYNC);
 			if(match) {
-				if(drx->channel == drx_fc->channel){
-					drx_fc->frameno = drx_fc->frameno + 1;
+				if (rxhdr != NULL){
+					printf("ALARM!!!");
 				}
 				uint8_t *op = drx->ethbuf + ETH_HLEN;
-				dect_rxhdr_t *rxhdr = (dect_rxhdr_t *)op;
+				rxhdr = (dect_rxhdr_t *)op;
+				rxhdr->isFP = isFP;
 				//printf("%08x\n",syncm);
 				rxhdr->channel = drx->channel;
 				rxhdr->frameno = drx_fc->frameno;
@@ -241,11 +246,11 @@ static int dectrx_rx(dectrx_t *drx, dectrx_fc_t *drx_fc, int eth_sock) {
 				rxhdr->sync = htons(drx->sync&0xffff);
 				drx->bitcnt = 0; /* start frame reception */
 				drx->frame_len = sizeof(dect_afield_t);
-				drx->stats[(syncm == FP_SYNC) ? FP_PKTS : PP_PKTS]++;
+				drx->stats[(isFP) ? FP_PKTS : PP_PKTS]++;
 			}
 			if(match || (drx->bitcnt < 0))
 				continue;
-			
+					
 			//printf("%d %d\n",drx->bitcnt>>3,drx->frame_len);
 			assert(drx->frame_len >= sizeof(dect_afield_t));
 			assert((drx->bitcnt>>3)<=(sizeof(dect_afield_t)+100));
@@ -259,12 +264,18 @@ static int dectrx_rx(dectrx_t *drx, dectrx_fc_t *drx_fc, int eth_sock) {
 			if(drx->bitcnt == (sizeof(dect_afield_t)<<3)) {
 				uint16_t crc = calc_rcrc(drx->ethbuf + ETH_HLEN + sizeof(dect_rxhdr_t));
 				dect_afield_t *af = (dect_afield_t *) (drx->ethbuf + ETH_HLEN + sizeof(dect_rxhdr_t));
-				bool isQt = ((af->header >> 5 ) & 0x07) == 4;
-				if(isQt){
-					drx_fc->frameno = 8;
-					drx_fc->channel = drx->channel;
-					//rxhdr->frameno = 8;
+				if(rxhdr != NULL && rxhdr->isFP){
+					printf("YES");
+					bool isQt = ((af->header >> 5 ) & 0x07) == 4;
+					if(isQt){
+						drx_fc->frameno = 8;
+						drx_fc->channel = drx->channel;
+						rxhdr->frameno = 8;
+					}else {
+					        drx_fc->frameno = (drx_fc->frameno + 1) &0xF;
+					}
 				}
+				
 				uint8_t ba = (af->header>>1)&7;
 				int blen;
 				
@@ -292,15 +303,14 @@ static int dectrx_rx(dectrx_t *drx, dectrx_fc_t *drx_fc, int eth_sock) {
 			if((drx->bitcnt>>3) == drx->frame_len) {
 				/* B-field complete */
 				drx->bitcnt=-1;
-				printf("frame sent to ethernet \n");
+				// printf("frame sent to ethernet \n");
 				fflush(stdout);
 				send(eth_sock, drx->ethbuf, ETH_HLEN + sizeof(dect_rxhdr_t) + drx->frame_len, 0);
 				if(drx->verbose) {
 					hexdump(drx->ethbuf + ETH_HLEN + sizeof(dect_rxhdr_t) - 5, drx->frame_len + 5);
 					puts("");
 				}
-			} else {
-				printf("Not send \n");
+				return 0;
 			}
 		} /* foreach incoming bit */
 	} /* foreach incoming byte */

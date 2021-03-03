@@ -286,7 +286,7 @@ blocks:
     bus_sink: false
     bus_source: false
     bus_structure: null
-    coordinate: [829, 31]
+    coordinate: [829, 30]
     rotation: 0
     state: enabled
 - name: blocks_pack_k_bits_bb_0
@@ -896,7 +896,7 @@ blocks:
     ant7: ''
     ant8: ''
     ant9: ''
-    args: ''
+    args: hackrf=0
     bb_gain0: bb_gain
     bb_gain1: '20'
     bb_gain10: '20'
